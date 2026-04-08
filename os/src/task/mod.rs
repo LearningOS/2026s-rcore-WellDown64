@@ -17,6 +17,7 @@ mod task;
 use crate::config::MAX_APP_NUM;
 use crate::loader::{get_num_app, init_app_cx};
 use crate::sync::UPSafeCell;
+use crate::syscall::SYSCALLS;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
@@ -39,12 +40,34 @@ pub struct TaskManager {
     inner: UPSafeCell<TaskManagerInner>,
 }
 
+/// `counters[0..5]` represents the request count of
+/// SYSCALL_WRITE
+/// SYSCALL_EXIT
+/// SYSCALL_YIELD
+/// SYSCALL_GET_TIME
+/// SYSCALL_TRACE
+/// respectively
+/// This is not an elegent implementation.
+struct TaskSyscallCounter {
+    counters: [usize; SYSCALLS.len()],
+}
+
+impl TaskSyscallCounter {
+    pub fn new() -> Self {
+        Self {
+            counters: [0; SYSCALLS.len()]
+        }
+    }
+}
+
 /// Inner of Task Manager
 pub struct TaskManagerInner {
     /// task list
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    /// trace request count of each task
+    syscall_counters: [TaskSyscallCounter; MAX_APP_NUM],
 }
 
 lazy_static! {
@@ -65,6 +88,7 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    syscall_counters: core::array::from_fn(|_| TaskSyscallCounter::new())
                 })
             },
         }
@@ -168,4 +192,27 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+
+/// Increase request count of current task
+pub fn inc_request_count(index: usize) {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current_task = inner.current_task;
+    let current_counter = &mut inner.syscall_counters[current_task];
+    current_counter.counters[index] += 1;
+}
+
+/// return request count of current task
+pub fn get_request_count(syscall_id: usize) -> isize {
+    let inner = TASK_MANAGER.inner.exclusive_access();
+    let current_task = inner.current_task;
+    let current_counter = &inner.syscall_counters[current_task];
+    match syscall_id {
+        _ if syscall_id == SYSCALLS[0] => current_counter.counters[0] as isize,
+        _ if syscall_id == SYSCALLS[1] => current_counter.counters[1] as isize,
+        _ if syscall_id == SYSCALLS[2] => current_counter.counters[2] as isize,
+        _ if syscall_id == SYSCALLS[3] => current_counter.counters[3] as isize,
+        _ if syscall_id == SYSCALLS[4] => current_counter.counters[4] as isize,
+        _ => -1,
+    }
 }
