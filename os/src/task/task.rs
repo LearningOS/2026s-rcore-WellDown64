@@ -1,10 +1,14 @@
 //! Types related to task management
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
 use super::TaskContext;
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
 use crate::trap::{trap_handler, TrapContext};
+use crate::syscall::SYSCALLS;
 
 /// The task control block (TCB) of a task.
 pub struct TaskControlBlock {
@@ -28,6 +32,12 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+}
+
+/// struct that counts each syscall
+pub struct TaskSyscallCounter {
+    /// syscall_id -> request_times
+    counter: BTreeMap<usize, usize>,
 }
 
 impl TaskControlBlock {
@@ -94,6 +104,35 @@ impl TaskControlBlock {
             Some(old_break)
         } else {
             None
+        }
+    }
+}
+
+impl TaskSyscallCounter {
+    /// create an empty new counter, inserting each syscall_id
+    pub fn new() -> Self {
+        let mut btree_map = BTreeMap::new();
+        for syscall_id in SYSCALLS {
+            btree_map.insert(syscall_id, 0);
+        }
+        TaskSyscallCounter {
+            counter: btree_map,
+        }
+    }
+    /// get the count of given syscall
+    pub fn cnt(&self, syscall_id: usize) -> isize {
+        if let Some(cnt) = self.counter.get(&syscall_id) {
+            *cnt as isize
+        }
+        else {
+            -1
+        }
+    }
+    
+    /// increase the counter of given syscall
+    pub fn inc_syscall_req(&mut self, syscall_id: usize) {
+        if let Some(cnt) = self.counter.get(&syscall_id) {
+            self.counter.insert(syscall_id, cnt + 1);
         }
     }
 }

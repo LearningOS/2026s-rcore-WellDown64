@@ -64,6 +64,15 @@ impl MemorySet {
         );
     }
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
+        // Check for overlap with existing areas
+        for area in &self.areas {
+            if map_area.vpn_range.overlap(&area.vpn_range) {
+                panic!(
+                    "MapArea overlap: new {:?} with existing {:?}",
+                    map_area.vpn_range, area.vpn_range
+                );
+            }
+        }
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
             map_area.copy_data(&mut self.page_table, data);
@@ -173,7 +182,9 @@ impl MemorySet {
                     map_perm |= MapPermission::X;
                 }
                 let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
-                max_end_vpn = map_area.vpn_range.get_end();
+                if map_area.vpn_range.get_end() > max_end_vpn {
+                    max_end_vpn = map_area.vpn_range.get_end();
+                }
                 memory_set.push(
                     map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
@@ -262,9 +273,35 @@ impl MemorySet {
             false
         }
     }
+
+    /// find if there is an area overlaps with `[l..r]`
+    pub fn area_overlaps(&self, l: usize, r: usize) -> bool {
+        let vpn_range = VPNRange::new(VirtAddr::from(l).floor(), VirtAddr::from(r).ceil());
+        self.areas.iter().any(|a| a.vpn_range.overlap(&vpn_range))
+    }
+
+    /// unmap an area
+    pub fn unmap(&mut self, l: usize, r: usize) -> bool {
+        let start_va = VirtAddr::from(l);
+        let end_va = VirtAddr::from(r);
+        if let Some((idx, area)) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .find(|(_, a)| a.contains_range(start_va, end_va))
+        {
+            area.unmap(&mut self.page_table);
+            self.areas.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
+    start_va: VirtAddr,
+    end_va: VirtAddr,
     vpn_range: VPNRange,
     data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
@@ -281,11 +318,16 @@ impl MapArea {
         let start_vpn: VirtPageNum = start_va.floor();
         let end_vpn: VirtPageNum = end_va.ceil();
         Self {
+            start_va,
+            end_va,
             vpn_range: VPNRange::new(start_vpn, end_vpn),
             data_frames: BTreeMap::new(),
             map_type,
             map_perm,
         }
+    }
+    pub fn contains_range(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        self.start_va == start && self.end_va == end
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;

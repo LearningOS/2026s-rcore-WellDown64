@@ -15,12 +15,13 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::MapPermission;
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskSyscallCounter, TaskStatus};
 
 pub use context::TaskContext;
 
@@ -40,10 +41,17 @@ pub struct TaskManager {
     inner: UPSafeCell<TaskManagerInner>,
 }
 
+struct TaskInfo {
+    // Task control block
+    tcb: TaskControlBlock,
+    // counters for request times of syscalls
+    counter: TaskSyscallCounter,
+}
+
 /// The task manager inner in 'UPSafeCell'
 struct TaskManagerInner {
     /// task list
-    tasks: Vec<TaskControlBlock>,
+    tasks: Vec<TaskInfo>,
     /// id of current `Running` task
     current_task: usize,
 }
@@ -54,9 +62,14 @@ lazy_static! {
         println!("init TASK_MANAGER");
         let num_app = get_num_app();
         println!("num_app = {}", num_app);
-        let mut tasks: Vec<TaskControlBlock> = Vec::new();
+        let mut tasks: Vec<TaskInfo> = Vec::new();
         for i in 0..num_app {
-            tasks.push(TaskControlBlock::new(get_app_data(i), i));
+            tasks.push(
+                TaskInfo {
+                    tcb: TaskControlBlock::new(get_app_data(i), i),
+                    counter: TaskSyscallCounter::new(),
+                }
+            );
         }
         TaskManager {
             num_app,
@@ -77,7 +90,7 @@ impl TaskManager {
     /// But in ch4, we load apps statically, so the first task is a real app.
     fn run_first_task(&self) -> ! {
         let mut inner = self.inner.exclusive_access();
-        let next_task = &mut inner.tasks[0];
+        let next_task = &mut inner.tasks[0].tcb;
         next_task.task_status = TaskStatus::Running;
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
@@ -93,14 +106,14 @@ impl TaskManager {
     fn mark_current_suspended(&self) {
         let mut inner = self.inner.exclusive_access();
         let cur = inner.current_task;
-        inner.tasks[cur].task_status = TaskStatus::Ready;
+        inner.tasks[cur].tcb.task_status = TaskStatus::Ready;
     }
 
     /// Change the status of current `Running` task into `Exited`.
     fn mark_current_exited(&self) {
         let mut inner = self.inner.exclusive_access();
         let cur = inner.current_task;
-        inner.tasks[cur].task_status = TaskStatus::Exited;
+        inner.tasks[cur].tcb.task_status = TaskStatus::Exited;
     }
 
     /// Find next task to run and return task id.
@@ -111,26 +124,26 @@ impl TaskManager {
         let current = inner.current_task;
         (current + 1..current + self.num_app + 1)
             .map(|id| id % self.num_app)
-            .find(|id| inner.tasks[*id].task_status == TaskStatus::Ready)
+            .find(|id| inner.tasks[*id].tcb.task_status == TaskStatus::Ready)
     }
 
     /// Get the current 'Running' task's token.
     fn get_current_token(&self) -> usize {
         let inner = self.inner.exclusive_access();
-        inner.tasks[inner.current_task].get_user_token()
+        inner.tasks[inner.current_task].tcb.get_user_token()
     }
 
     /// Get the current 'Running' task's trap contexts.
     fn get_current_trap_cx(&self) -> &'static mut TrapContext {
         let inner = self.inner.exclusive_access();
-        inner.tasks[inner.current_task].get_trap_cx()
+        inner.tasks[inner.current_task].tcb.get_trap_cx()
     }
 
     /// Change the current 'Running' task's program break
     pub fn change_current_program_brk(&self, size: i32) -> Option<usize> {
         let mut inner = self.inner.exclusive_access();
         let cur = inner.current_task;
-        inner.tasks[cur].change_program_brk(size)
+        inner.tasks[cur].tcb.change_program_brk(size)
     }
 
     /// Switch current `Running` task to the task we have found,
@@ -139,10 +152,10 @@ impl TaskManager {
         if let Some(next) = self.find_next_task() {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
-            inner.tasks[next].task_status = TaskStatus::Running;
+            inner.tasks[next].tcb.task_status = TaskStatus::Running;
             inner.current_task = next;
-            let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
-            let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
+            let current_task_cx_ptr = &mut inner.tasks[current].tcb.task_cx as *mut TaskContext;
+            let next_task_cx_ptr = &inner.tasks[next].tcb.task_cx as *const TaskContext;
             drop(inner);
             // before this, we should drop local variables that must be dropped manually
             unsafe {
@@ -201,4 +214,48 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Increase the request times of given syscall for current task.
+pub fn inc_current_syscall_req(syscall_id: usize) {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let curr_task = inner.current_task;
+    let current_task_info = &mut inner.tasks[curr_task];
+    current_task_info.counter.inc_syscall_req(syscall_id);
+}
+
+/// Get the request times of syscall with `syscall_id` for current task
+pub fn current_syscall_req_cnt(syscall_id: usize) -> isize {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current_task = inner.current_task;
+    let current_task_info = &mut inner.tasks[current_task];
+    current_task_info.counter.cnt(syscall_id)
+}
+
+/// create a new frame and map it to a virtual address for current user task
+pub fn current_insert_frame_area(start: usize, end: usize, perm: MapPermission) -> isize {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current_task = inner.current_task;
+    let mem_set = &mut inner.tasks[current_task].tcb.memory_set;
+
+
+    if mem_set.area_overlaps(start, end) {
+        return -1;
+    }
+    mem_set.insert_framed_area(start.into(), end.into(), perm);
+    0
+}
+
+/// unmap a frame at address [start, end]
+pub fn current_unmap_frame(start: usize, end:usize) -> isize {
+    let mut inner = TASK_MANAGER.inner.exclusive_access();
+    let current_task = inner.current_task;
+    let mem_set = &mut inner.tasks[current_task].tcb.memory_set;
+
+    if mem_set.unmap(start, end) {
+        0
+    }
+    else {
+        -1
+    }
 }

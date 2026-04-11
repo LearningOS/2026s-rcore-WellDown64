@@ -25,14 +25,28 @@ const SYSCALL_MMAP: usize = 222;
 /// trace syscall
 const SYSCALL_TRACE: usize = 410;
 
+/// All syscalls
+pub const SYSCALLS: [usize; 8] = [
+    SYSCALL_WRITE,
+    SYSCALL_EXIT,
+    SYSCALL_YIELD,
+    SYSCALL_GET_TIME,
+    SYSCALL_SBRK,
+    SYSCALL_MUNMAP,
+    SYSCALL_MMAP,
+    SYSCALL_TRACE,
+];
+
 mod fs;
 mod process;
 
 use fs::*;
 use process::*;
+use crate::task::inc_current_syscall_req;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    inc_current_syscall_req(syscall_id);
     match syscall_id {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
