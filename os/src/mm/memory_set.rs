@@ -300,6 +300,30 @@ impl MemorySet {
             false
         }
     }
+
+    /// find if there is an area overlaps with `[l..r]`
+    pub fn area_overlaps(&self, l: usize, r: usize) -> bool {
+        let vpn_range = VPNRange::new(VirtAddr::from(l).floor(), VirtAddr::from(r).ceil());
+        self.areas.iter().any(|a| a.vpn_range.overlap(&vpn_range))
+    }
+
+    /// unmap an area
+    pub fn unmap(&mut self, l: usize, r: usize) -> bool {
+        let start_va = VirtAddr::from(l);
+        let end_va = VirtAddr::from(r);
+        if let Some((idx, area)) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .find(|(_, a)| a.contains_range(start_va, end_va))
+        {
+            area.unmap(&mut self.page_table);
+            self.areas.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
 }
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
@@ -332,6 +356,9 @@ impl MapArea {
             map_type: another.map_type,
             map_perm: another.map_perm,
         }
+    }
+    pub fn contains_range(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        self.vpn_range.get_start() == start.floor() && self.vpn_range.get_end() == end.ceil()
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;

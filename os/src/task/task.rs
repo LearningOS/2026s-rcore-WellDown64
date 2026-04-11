@@ -1,4 +1,7 @@
 //! Types related to task management & Functions for completely changing TCB
+//! Types related to task management
+extern crate alloc;
+
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
