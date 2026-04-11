@@ -25,13 +25,14 @@ mod task;
 use crate::fs::{open_file, OpenFlags};
 use alloc::sync::Arc;
 pub use context::TaskContext;
+use crate::mm::MapPermission;
 use lazy_static::*;
 pub use manager::{fetch_task, TaskManager};
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 
 pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-pub use manager::add_task;
+pub use manager::{add_task, TASK_MANAGER};
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
     Processor,
@@ -119,4 +120,30 @@ lazy_static! {
 ///Add init process to the manager
 pub fn add_initproc() {
     add_task(INITPROC.clone());
+}
+
+/// create a new frame and map it to a virtual address for current user task
+pub fn current_insert_frame_area(start: usize, end: usize, perm: MapPermission) -> isize {
+    let current_task = current_task().unwrap();
+    let mut task_inner = current_task.inner_exclusive_access();
+    let mem_set = &mut task_inner.memory_set;
+
+    if mem_set.area_overlaps(start, end) {
+        return -1;
+    }
+    mem_set.insert_framed_area(start.into(), end.into(), perm);
+    0
+}
+
+/// unmap a frame at address [start, end]
+pub fn current_unmap_frame(start: usize, end: usize) -> isize {
+    let current_task = current_task().unwrap();
+    let mut task_inner = current_task.inner_exclusive_access();
+    let mem_set = &mut task_inner.memory_set;
+
+    if mem_set.unmap(start, end) {
+        0
+    } else {
+        -1
+    }
 }

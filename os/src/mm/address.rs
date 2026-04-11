@@ -221,7 +221,7 @@ impl StepByOne for PhysPageNum {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 /// a simple range structure for type T
 pub struct SimpleRange<T>
 where
@@ -243,6 +243,9 @@ where
     }
     pub fn get_end(&self) -> T {
         self.r
+    }
+    pub fn overlap(&self, other: &Self) -> bool {
+        self.l < other.r && other.l < self.r
     }
 }
 impl<T> IntoIterator for SimpleRange<T>

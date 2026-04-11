@@ -12,6 +12,9 @@ use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
 
+/// Upper bound of the stride of a process, intending to stride scheduling algorithm
+pub const BIG_STRIDE: isize = 160_000;
+
 /// Processor management structure
 pub struct Processor {
     ///The task currently executing on the current processor
@@ -59,6 +62,8 @@ pub fn run_tasks() {
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
+            // pass = BIG_STRIDE / piro
+            task_inner.stride += BIG_STRIDE / task_inner.priority;
             let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
             task_inner.task_status = TaskStatus::Running;
             // release coming task_inner manually

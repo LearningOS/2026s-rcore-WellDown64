@@ -7,9 +7,13 @@ use crate::{
     mm::{translated_refmut, translated_str},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next,
+        suspend_current_and_run_next, current_insert_frame_area, current_unmap_frame,
     },
 };
+use crate::config::{PAGE_SIZE, TRAMPOLINE};
+use crate::mm::{translated_byte_buffer, MapPermission};
+use crate::timer::get_time_us;
+use core::mem::size_of;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -105,30 +109,100 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
+    trace!("kernel: sys_get_time");
+    let us = get_time_us();
+    let mut ts_buf =
+        translated_byte_buffer(current_user_token(), ts as *mut u8, size_of::<TimeVal>());
+    let written_val = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    if ts_buf.len() == 1 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                core::ptr::addr_of!(written_val) as *const u8,
+                ts_buf[0].as_mut_ptr(),
+                size_of::<TimeVal>(),
+            );
+        }
+    } else if ts_buf.len() == 2 {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                core::ptr::addr_of!(written_val.sec) as *const u8,
+                ts_buf[0].as_mut_ptr(),
+                size_of::<usize>(),
+            );
+            core::ptr::copy_nonoverlapping(
+                core::ptr::addr_of!(written_val.usec) as *const u8,
+                ts_buf[1].as_mut_ptr(),
+                size_of::<usize>(),
+            );
+        }
+    } else {
+        panic!("Unkown error");
+    }
+    0
 }
 
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+// YOUR JOB: Implement mmap.
+pub fn sys_mmap(start: usize, len: usize, prot: usize) -> isize {
+    trace!("kernel: sys_mmap");
+    // `start` should be aligned with `PAGE_SIZE`
+    if start & (PAGE_SIZE - 1) != 0 {
+        return -1;
+    }
+    if start >= TRAMPOLINE {
+        return -1;
+    }
+    let end = match start.checked_add(len) {
+        Some(e) => e,
+        None => return -1,
+    };
+    if end > TRAMPOLINE {
+        return -1;
+    }
+
+    // bit 0: Readable
+    // bit 1: Writable
+    // bit 2: Executable
+    // Else must be 0
+    if prot & !0x7 != 0 || prot & 0x7 == 0 {
+        return -1;
+    }
+
+    let mut perm = MapPermission::U;
+    if prot & 1 != 0 {
+        perm |= MapPermission::R;
+    }
+    if prot & (1 << 1) != 0 {
+        perm |= MapPermission::W;
+    }
+    if prot & (1 << 2) != 0 {
+        perm |= MapPermission::X;
+    }
+
+    current_insert_frame_area(start, start + len, perm)
 }
 
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+// YOUR JOB: Implement munmap.
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    trace!("kernel: sys_munmap");
+    // `start` should be aligned with `PAGE_SIZE`
+    if start & (PAGE_SIZE - 1) != 0 {
+        return -1;
+    }
+    if start >= TRAMPOLINE {
+        return -1;
+    }
+    let end = match start.checked_add(len) {
+        Some(e) => e,
+        None => return -1,
+    };
+    if end > TRAMPOLINE {
+        return -1;
+    }
+    current_unmap_frame(start, end)
 }
 
 /// change data segment size
@@ -143,19 +217,31 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+pub fn sys_spawn(path: *const u8) -> isize {
+    trace!( "kernel:pid[{}] sys_spawn", current_task().unwrap().pid.0);
+    let token = current_user_token();
+    let path = translated_str(token, path);
+
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let all_data = app_inode.read_all();
+        let task = current_task().unwrap();
+        let child = task.spawn(all_data.as_slice());
+
+        child.getpid() as isize
+    } else {
+        -1
+    }
 }
 
-// YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
-    trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
-        current_task().unwrap().pid.0
-    );
-    -1
+/// YOUR JOB: Set task priority.
+pub fn sys_set_priority(prio: isize) -> isize {
+    trace!( "kernel:pid[{}] sys_set_priority", current_task().unwrap().pid.0);
+    if prio >= 2 {
+        let task = current_task().unwrap();
+        task.set_priority(prio);
+        prio
+    }
+    else {
+        -1
+    }
 }
