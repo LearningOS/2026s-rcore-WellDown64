@@ -22,8 +22,8 @@ mod switch;
 mod task;
 
 use crate::loader::get_app_data_by_name;
-use alloc::sync::Arc;
 use crate::mm::MapPermission;
+use alloc::sync::Arc;
 use lazy_static::*;
 pub use manager::{fetch_task, TaskManager};
 use switch::__switch;
@@ -119,10 +119,9 @@ pub fn add_initproc() {
 
 /// create a new frame and map it to a virtual address for current user task
 pub fn current_insert_frame_area(start: usize, end: usize, perm: MapPermission) -> isize {
-    let current_task = take_current_task().unwrap();
+    let current_task = current_task().unwrap();
     let mut task_inner = current_task.inner_exclusive_access();
     let mem_set = &mut task_inner.memory_set;
-
 
     if mem_set.area_overlaps(start, end) {
         return -1;
@@ -132,15 +131,14 @@ pub fn current_insert_frame_area(start: usize, end: usize, perm: MapPermission) 
 }
 
 /// unmap a frame at address [start, end]
-pub fn current_unmap_frame(start: usize, end:usize) -> isize {
-    let current_task = take_current_task().unwrap();
+pub fn current_unmap_frame(start: usize, end: usize) -> isize {
+    let current_task = current_task().unwrap();
     let mut task_inner = current_task.inner_exclusive_access();
     let mem_set = &mut task_inner.memory_set;
 
     if mem_set.unmap(start, end) {
         0
-    }
-    else {
+    } else {
         -1
     }
 }

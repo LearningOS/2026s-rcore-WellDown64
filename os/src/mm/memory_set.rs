@@ -361,6 +361,7 @@ impl MapArea {
         self.vpn_range.get_start() == start.floor() && self.vpn_range.get_end() == end.ceil()
     }
     pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+        trace!("map_one");
         let ppn: PhysPageNum;
         match self.map_type {
             MapType::Identical => {
