@@ -226,8 +226,10 @@ pub fn sys_spawn(path: *const u8) -> isize {
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
         let child = task.spawn(all_data.as_slice());
+        let pid = child.getpid();
+        add_task(child);
 
-        child.getpid() as isize
+        pid as isize
     } else {
         -1
     }

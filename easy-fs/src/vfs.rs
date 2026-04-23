@@ -203,8 +203,7 @@ impl Inode {
                     &self.block_device,
                 );
                 0
-            }
-            else {
+            } else {
                 -1
             }
         })
@@ -212,46 +211,93 @@ impl Inode {
 
     /// unlink a file, dealloc its inode and blocks
     pub fn unlinkat(&self, name: &str) -> isize {
-        let mut _fs = self.fs.lock();
-        if let Some(inode) = self.find(name) {
-            self.modify_disk_inode(|disk_inode| {
+        // First find the inode id of the target
+        let fs = self.fs.lock();
+        let target_inode_id =
+            self.read_disk_inode(|disk_inode| self.find_inode_id(name, disk_inode));
+
+        if let Some(inode_id) = target_inode_id {
+            // Get block position before potentially clearing
+            let (block_id, block_offset) = fs.get_disk_inode_pos(inode_id);
+
+            // Now modify directory to remove entry and check link count
+            let mut should_clear = false;
+            let result = self.modify_disk_inode(|disk_inode| {
                 let file_count = (disk_inode.size as usize) / DIRENT_SZ;
                 let mut dirent = DirEntry::empty();
+                let mut target_index = None;
                 let mut nlink = 0;
-                let mut inode_id = 0;
+
+                // Scan directory to find target and count links
                 for i in 0..file_count {
                     assert_eq!(
-                        disk_inode.read_at(DIRENT_SZ * i, dirent.as_bytes_mut(), &self.block_device,),
+                        disk_inode.read_at(
+                            DIRENT_SZ * i,
+                            dirent.as_bytes_mut(),
+                            &self.block_device,
+                        ),
                         DIRENT_SZ,
                     );
                     if dirent.name() == name {
-                        inode_id = dirent.inode_id();
-                        disk_inode.write_at(self.block_offset, dirent.as_bytes(), &self.block_device);
-                        nlink -= 1;
+                        target_index = Some(i);
                     }
                     if dirent.inode_id() == inode_id {
                         nlink += 1;
                     }
                 }
-                if nlink == 0 {
-                    inode.clear();
+
+                if let Some(idx) = target_index {
+                    // Write empty entry over the target
+                    let empty = DirEntry::empty();
+                    disk_inode.write_at(idx * DIRENT_SZ, empty.as_bytes(), &self.block_device);
+
+                    // If this was the last link, mark for clearing
+                    if nlink == 1 {
+                        should_clear = true;
+                    }
+                    0
+                } else {
+                    -1
                 }
-                0
-            })
-        }
-        else {
+            });
+
+            // Release fs lock before clearing (clear needs to lock fs)
+            drop(fs);
+
+            // If we need to clear the inode, do it now
+            if should_clear {
+                let inode = Inode::new(
+                    block_id,
+                    block_offset,
+                    self.fs.clone(),
+                    self.block_device.clone(),
+                );
+                inode.clear();
+            }
+
+            result
+        } else {
             -1
         }
-
     }
-
     /// the inode id
     pub fn inode_id(&self) -> usize {
+        let _fs = self.fs.lock();
         self.block_id * BLOCK_SZ + self.block_offset
     }
 
+    /// the disk inode index (used in directory entries)
+    pub fn disk_inode_id(&self) -> u32 {
+        let fs = self.fs.lock();
+        let inode_size = core::mem::size_of::<DiskInode>();
+        let inodes_per_block = BLOCK_SZ / inode_size;
+        let block_offset_within_area = self.block_id as u32 - fs.inode_area_start_block();
+        (block_offset_within_area * inodes_per_block as u32)
+            + (self.block_offset / inode_size) as u32
+    }
+
     /// number of hard links, ROOT_DIR calls it
-    pub fn nlink(&self, inode_id: usize) -> usize {
+    pub fn nlink(&self, inode_id: u32) -> usize {
         let mut count = 0;
         self.read_disk_inode(|disk_inode| {
             assert!(disk_inode.is_dir());
@@ -263,7 +309,7 @@ impl Inode {
                     DIRENT_SZ,
                 );
 
-                if dirent.inode_id() as usize == inode_id {
+                if dirent.inode_id() == inode_id {
                     count += 1;
                 }
             }

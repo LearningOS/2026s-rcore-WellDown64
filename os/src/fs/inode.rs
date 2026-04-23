@@ -169,16 +169,15 @@ impl File for OSInode {
 
     fn stat(&self) -> Stat {
         let inner = self.inner.exclusive_access();
-        let inode_id = inner.inode.inode_id();
-        let nlink = inner.inode.nlink(inode_id);
-    
+        let disk_inode_id = inner.inode.disk_inode_id();
+        let nlink = ROOT_INODE.nlink(disk_inode_id);
+
         Stat {
             dev: 0,
-            ino: inode_id as u64,
+            ino: disk_inode_id as u64,
             mode: StatMode::FILE,
             nlink: nlink as u32,
             pad: [0; 7],
-
         }
     }
 }
