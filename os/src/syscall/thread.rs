@@ -41,6 +41,11 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
         tasks.push(None);
     }
     tasks[new_task_tid] = Some(Arc::clone(&new_task));
+
+    let (mut mutex_checker, mut sem_checker) = process.checker_exclusive_access();
+    mutex_checker.add_new_thr(new_task_tid);
+    sem_checker.add_new_thr(new_task_tid);
+
     let new_task_trap_cx = new_task_inner.get_trap_cx();
     *new_task_trap_cx = TrapContext::app_init_context(
         entry,

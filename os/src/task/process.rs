@@ -14,6 +14,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use core::marker::PhantomData;
 
 /// Process Control Block
 pub struct ProcessControlBlock {
@@ -21,6 +22,10 @@ pub struct ProcessControlBlock {
     pub pid: PidHandle,
     /// mutable
     inner: UPSafeCell<ProcessControlBlockInner>,
+    /// mutex dead lock checker
+    mutex_checker: UPSafeCell<DeadLockChecker<MutexChecker>>,
+    /// semaphore dead lock checker
+    sem_checker: UPSafeCell<DeadLockChecker<SemaphoreChecker>>,
 }
 
 /// Inner of Process Control Block
@@ -49,6 +54,135 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+}
+
+/// dead lock checker
+pub struct DeadLockChecker<T> {
+    /// if the checker is enabled
+    enable: bool,
+    /// available [n_res]
+    pub available: Vec<usize>,
+    /// allocation [n_thr][n_res]
+    pub allocation: Vec<Vec<usize>>,
+    /// need [n_thr][n_res]
+    pub need: Vec<Vec<usize>>,
+    _marker: PhantomData<T>,
+}
+
+impl<T> DeadLockChecker<T> {
+    /// create a new checker
+    pub fn new(n_thr: usize) -> Self {
+        Self {
+            enable: false,
+            available: vec![],
+            allocation: vec![vec![]; n_thr],
+            need: vec![vec![]; n_thr],
+            _marker: PhantomData,
+        }
+    }
+
+    /// enable checker
+    pub fn enable(&mut self) {
+        self.enable = true;
+    }
+
+    /// is enabled?
+    pub fn is_enabled(&self) -> bool {
+        self.enable
+    }
+
+
+    /// add a new thread, no matter it is enabled or not
+    pub fn add_new_thr(&mut self, tid: usize) {
+        if tid >= self.allocation.len() {
+            assert!(tid == self.allocation.len());
+            self.allocation.push(vec![0; self.available.len()]);
+            self.need.push(vec![0; self.available.len()]);
+        }
+        else {
+            self.allocation[tid] = vec![0; self.available.len()];
+            self.need[tid] = vec![0; self.available.len()];
+        }
+    }
+
+    /// check if it is safe to alloc resource
+    pub fn is_safe(&self) -> bool {
+        let n_thr = self.allocation.len();
+        let mut work: Vec<usize> = self.available.to_vec();
+        let mut finish = vec![false; n_thr];
+
+        while let Some(n) = (0..n_thr).find(|&i|  {
+            !finish[i] && self.need[i].iter().enumerate().all(|(j, &need)| need <= work[j])
+        }) {
+            finish[n] = true;
+            work = work.iter_mut().enumerate().map(|(idx, &mut res)| res + self.allocation[n][idx]).collect();
+        }
+        finish.iter().all(|val| *val)
+
+    }
+}
+
+/// mutex checker
+pub struct MutexChecker;
+
+/// semaphore checker
+pub struct SemaphoreChecker;
+
+impl DeadLockChecker<MutexChecker> {
+    /// test if it is safe to aquire `mid` in thread `tid`
+    pub fn request(&mut self, tid: usize, mid: usize) -> bool {
+        if self.available[mid] > 0 {
+            self.available[mid] -= 1;
+            self.allocation[tid][mid] += 1;
+            self.need[tid][mid] = 0;
+            self.is_safe()
+        }
+        else if self.available[mid] == 0 {
+            self.need[tid][mid] = 1;
+            self.is_safe()
+        }
+        else {
+            false
+        }
+
+    }
+
+    /// release res of `mid` in thread `tid`
+    pub fn release(&mut self, tid: usize, mid: usize) {
+        self.available[mid] = 1;
+        self.allocation[tid][mid] = 0;
+        self.need[tid][mid] = 0;
+    }
+}
+impl DeadLockChecker<SemaphoreChecker> {
+    /// test if it is safe to aquire `sid` in thread `tid`
+    pub fn request(&mut self, tid: usize, sid: usize) -> bool {
+        if self.available[sid] > 0 {
+            self.available[sid] -= 1;
+            trace!("tid: {}, sid: {}, {} {}", tid, sid, self.allocation.len(), self.allocation[0].len());
+            self.allocation[tid][sid] += 1;
+            self.is_safe()
+        }
+        else if self.available[sid] == 0 {
+            // I don't know if it is correct
+            self.need[tid][sid] += 1;
+            self.is_safe()
+
+        }
+        else {
+            false
+        }
+    }
+
+    /// release res of `sid` in thread `tid`
+    pub fn release(&mut self, tid: usize, sid: usize) {
+        self.available[sid] += 1;
+        // it seems buggy
+        if self.allocation[tid][sid] > 0 {
+            self.allocation[tid][sid] -= 1;
+        }
+        self.need[tid][sid] = 0;
+    }
 }
 
 impl ProcessControlBlockInner {
@@ -89,6 +223,11 @@ impl ProcessControlBlock {
     pub fn inner_exclusive_access(&self) -> RefMut<'_, ProcessControlBlockInner> {
         self.inner.exclusive_access()
     }
+    /// checker_exclusive_access
+    pub fn checker_exclusive_access(&self)
+        -> (RefMut<'_, DeadLockChecker<MutexChecker>>, RefMut<'_, DeadLockChecker<SemaphoreChecker>>) {
+            (self.mutex_checker.exclusive_access(), self.sem_checker.exclusive_access())
+    }
     /// new process from elf file
     pub fn new(elf_data: &[u8]) -> Arc<Self> {
         trace!("kernel: ProcessControlBlock::new");
@@ -121,6 +260,8 @@ impl ProcessControlBlock {
                     condvar_list: Vec::new(),
                 })
             },
+            mutex_checker: unsafe{ UPSafeCell::new(DeadLockChecker::new(1)) },
+            sem_checker: unsafe{ UPSafeCell::new(DeadLockChecker::new(1)) },
         });
         // create a main thread, we should allocate ustack and trap_cx here
         let task = Arc::new(TaskControlBlock::new(
@@ -247,6 +388,8 @@ impl ProcessControlBlock {
                     condvar_list: Vec::new(),
                 })
             },
+            mutex_checker: unsafe{ UPSafeCell::new(DeadLockChecker::new(1)) },
+            sem_checker: unsafe{ UPSafeCell::new(DeadLockChecker::new(1)) },
         });
         // add child
         parent.children.push(Arc::clone(&child));
